@@ -104,3 +104,20 @@
 - 全程留证：药品登记、批号入库、领用创建/提交/审核/驳回/撤回、库存扣减、休药锁定/释放均写 `t_med_change_evidence`（含操作者、前后快照与幂等请求号），可经 `GET /api/aqua/med/evidence` 按对象或 requestId 追溯；池塘休药锁定经 `GET /api/aqua/med/withdrawal-locks?pondId=` 查询。
 
 验收：`mvn test -Dtest=MedRequisitionAcceptanceTest`，15 个检查点逐段输出报告，失败即停并给出停点。
+
+
+## 生长测量与出池预测（aqua-7）
+
+模块包路径 `com.evops.aqua.growth`，在台账之上打通：设备校正系数版本 → 按池塘和批次配置抽样方案（抽样数量/测量频次/允许偏差）→ 按频次生成测量任务 → 现场录入体重长度计算均值 → 异常样本复核标记 → 提交 → 主管确认更新预测出池量 → 测量记录反查方案，全程留证。
+
+- 设备校正系数版本（`POST /api/aqua/growth/device-versions`）：系数按设备版本保存，同设备发布新版本时旧版本自动停用；requestId 幂等。**历史测量任务冻结当时系数快照，不随新系数重算**；已停用版本不能用于新测量。
+- 抽样方案（`POST /api/aqua/growth/plans`）：按池塘和批次配置抽样数量、测量频次（间隔天数）与允许偏差（百分比）；批次必须在该池且未出池，**同一批次同一时刻只允许一个生效方案**；requestId 幂等。`POST /{id}/cancel` 作废方案，已生成任务不受影响。
+- 任务生成（`POST /api/aqua/growth/plans/{id}/tasks/generate`）：按频次在区间内逐测量日生成，**同计划同池同日幂等**；任务生成时冻结方案快照（抽样数量、允许偏差）。
+- 现场录入（`POST /api/aqua/growth/tasks/{id}/entry`，requestId 幂等）：设备版本+样本列表，**样本数必须等于方案抽样数量**；录入时冻结设备系数快照并计算均值——**均值只统计计入样本**（疑似/异常不计入），校正均值=原始均值×冻结系数；超出允许偏差的样本自动标记疑似异常（SUSPECT）。
+- 异常值复核（`POST /api/aqua/growth/tasks/{id}/samples/{sampleId}/review`）：**异常值不能静默删除——无删除入口，只能标记并填写复核理由（理由必填）**；复核为异常（ABNORMAL）不计入均值、样本原值保留，复核为正常（REVIEWED_NORMAL）计入均值；每次复核后重算均值与预测，提交前可反复复核，逐次留证。
+- 提交（`POST /api/aqua/growth/tasks/{id}/submit`）：**存在未复核疑似异常样本时拒绝**；重复提交幂等。
+- 主管确认（`POST /api/aqua/growth/tasks/{id}/confirm`）：确认人与确认意见缺一不可；**只有主管确认后，任务上的预测出池量（校正均重×批次现存数量）才更新到批次预测**（`GET /api/aqua/growth/batches/{batchId}/forecast`，每批一行当前值）；重复确认幂等不重复更新。
+- 反查（`GET /api/aqua/growth/tasks/{id}/trace`）：从测量记录反查抽样方案——定位原单（方案与任务快照）、处理人（方案登记/录入/提交/确认/复核人）及异常原因（逐尾复核结论与复核理由），并给出测量时冻结的设备系数快照。
+- 全程留证：版本发布/停用、方案配置/作废、任务生成/录入/复核/提交/确认、预测更新均写 `t_growth_change_evidence`（含操作者、前后快照与幂等请求号），可经 `GET /api/aqua/growth/evidence` 按对象或 requestId 追溯。
+
+验收：`mvn test -Dtest=GrowthMeasurementAcceptanceTest`，14 个检查点逐段输出报告，失败即停并给出停点。
